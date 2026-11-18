@@ -1,0 +1,45 @@
+---
+- name: Deploy HeartBeat Configuration
+  hosts: cluster_nodes
+  gather_facts: no
+
+  tasks:
+
+    - name: Create PowerShell module directory
+      win_file:
+        path: C:\Windows\Build\Modules\WSFCHeartBeatCSV
+        state: directory
+
+    - name: Create PowerShell config directory
+      win_file:
+        path: C:\Windows\Build\Config\WSFCHeartBeatCSV
+        state: directory
+
+    - name: Copy module file
+      win_copy:
+        src: /home/hcsadmin/ansible/HeartBeat/Module/HeartBeatTools.psm1
+        dest: C:\Windows\Build\Modules\WSFCHeartBeatCSV\HeartBeatTools.psm1
+
+    - name: Copy module manifest
+      win_copy:
+        src: /home/hcsadmin/ansible/HeartBeat/Module/HeartBeatTools.psd1
+        dest: C:\Windows\Build\Modules\WSFCHeartBeatCSV\HeartBeatTools.psd1
+
+    - name: Copy network CSV
+      win_copy:
+        src: /home/hcsadmin/ansible/HeartBeat/Config/HeartBeatNetworks.CSV
+        dest: C:\Windows\Build\Config\WSFCHeartBeatCSV\HeartBeatNetworks.csv
+
+    - name: Execute deployment
+      ansible.windows.win_powershell:
+        script: |
+          Import-Module C:\Windows\Build\Modules\WSFCHeartBeatCSV\HeartBeatTools.psd1 -Force
+
+          Invoke-HeartBeatDeployment
+          Disable-OldHeartBeatNIC
+
+      register: deployment_result
+
+    - name: Show output
+      debug:
+        var: deployment_result.output
