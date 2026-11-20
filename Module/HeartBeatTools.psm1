@@ -2648,7 +2648,7 @@ function Invoke-HeartBeatDeployment {
 
     Set-HeartBeatNICfromDNS
 
-    Set-HeartbeatClusterNetworkCSV
+    Set-HeartbeatClusterNetwork
 
     Add-HeartBeatRouteCSV
 
