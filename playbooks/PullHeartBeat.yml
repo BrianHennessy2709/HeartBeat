@@ -1,0 +1,74 @@
+---
+- name: Update HeartBeat repository
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:
+    - name: Pull latest code from GitHub
+      git:
+        repo: "https://github.com/BrianHennessy2709/HeartBeat.git"
+        dest: "/home/hcsadmin/ansible/HeartBeat"
+        version: "main"
+        update: yes
+        force: yes
+
+- name: Deploy HeartBeat Configuration
+  hosts: cluster_nodes
+  gather_facts: no
+
+  tasks:
+
+    - name: Create Build Module directory
+      win_file:
+        path: C:\Windows\Build\Modules\WSFCHeartBeatCSV
+        state: directory
+
+    - name: Create Build Config directory
+      win_file:
+        path: C:\Windows\Build\Config\WSFCHeartBeatCSV
+        state: directory
+
+    - name: Create Build config directory
+      win_file:
+        path: C:\Windows\Build\Scripts\WSFCHeartBeatCSV
+        state: directory
+
+    - name: Copy HeartBeat Module file
+      win_copy:
+        src: /home/hcsadmin/ansible/HeartBeat/Module/HeartBeatTools.psm1
+        dest: C:\Windows\Build\Modules\WSFCHeartBeatCSV\HeartBeatTools.psm1
+
+    - name: Copy HeartBeat Module manifest
+      win_copy:
+        src: /home/hcsadmin/ansible/HeartBeat/Module/HeartBeatTools.psd1
+        dest: C:\Windows\Build\Modules\WSFCHeartBeatCSV\HeartBeatTools.psd1
+
+    - name: Copy Network CSV
+      win_copy:
+        src: /home/hcsadmin/ansible/HeartBeat/Config/HeartBeatNetworks.CSV
+        dest: C:\Windows\Build\Config\WSFCHeartBeatCSV\HeartBeatNetworks.csv
+
+    - name: Copy Cleanup Script
+      win_copy:
+        src: /home/hcsadmin/ansible/HeartBeat/Scripts/Cleanup_WSFCHeartBeatCSV.ps1
+        dest: C:\Windows\Build\Scripts\WSFCHeartBeatCSV\Cleanup_WSFCHeartBeatCSV.ps1
+
+    - name: Execute Deployment
+      ansible.windows.win_powershell:
+        script: |
+          Import-Module C:\Windows\Build\Modules\WSFCHeartBeatCSV\HeartBeatTools.psd1 -Force
+
+          Invoke-HeartBeatDeployment
+          Disable-OldHeartBeatNIC
+
+    - name: Execute Cleanup
+      ansible.windows.win_powershell:
+         script: |
+            C:\Windows\Build\Scripts\WSFCHeartBeatCSV\Cleanup_WSFCHeartBeatCSV.ps1
+
+      register: deployment_result
+
+    - name: Show Output
+      debug:
+        var: deployment_result.output
