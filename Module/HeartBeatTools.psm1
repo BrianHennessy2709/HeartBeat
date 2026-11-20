@@ -1859,6 +1859,341 @@ function Set-HeartBeatNICCSV {
     Write-Log "Finished $FunctionName"
 }
 
+function Set-HeartBeatNICfromDNS {
+
+    <#
+    .SYNOPSIS
+    Configures or updates the HeartBeat network adapter using DNS and CSV-based network settings.
+
+    .DESCRIPTION
+    The Set-HeartBeatNICfromDNS function configures the Windows Failover Cluster
+    HeartBeat network adapter using the DNS record COMPUTERNAME-HB and network
+    settings defined in a CSV configuration file.
+
+    If a HeartBeat adapter already exists, the function validates that the adapter's
+    IPv4 address matches the IP address returned by the COMPUTERNAME-HB DNS record.
+    If the address differs, the existing HeartBeat adapter is automatically updated
+    with the correct IP address and prefix length from the CSV configuration.
+
+    If a HeartBeat adapter does not exist, the function locates a suitable
+    unassigned network adapter, renames it to HeartBeat, assigns the IP address
+    defined in DNS, applies the corresponding prefix length from the CSV
+    configuration, and disables DNS registration for the adapter.
+
+    If an adapter already exists with the expected HeartBeat IP address but has
+    been renamed, the function automatically renames the adapter back to HeartBeat.
+
+    This function is designed to be safely re-run and can be used to maintain the
+    desired HeartBeat network configuration after DNS updates, network migrations,
+    or adapter configuration drift.
+
+    .PARAMETER None
+    This function does not accept parameters.
+
+    .EXAMPLE
+    Set-HeartBeatNICfromDNS
+
+    Configures a new HeartBeat adapter using the IP address returned by the
+    COMPUTERNAME-HB DNS record and the matching network configuration from
+    HeartBeatNetworks.csv.
+
+    .EXAMPLE
+    Set-HeartBeatNICfromDNS
+
+    Validates an existing HeartBeat adapter against the COMPUTERNNAME-HB DNS record.
+    If the configured IP address differs from the DNS record, the adapter is
+    automatically reconfigured using the matching network settings from the CSV file.
+
+    .EXAMPLE
+    Set-HeartBeatNICfromDNS
+
+    Detects an adapter that is already configured with the HeartBeat IP address but
+    is not named HeartBeat, and automatically renames it to HeartBeat.
+
+    .NOTES
+    Requirements:
+    - A DNS A record named COMPUTERNAME-HB must exist.
+    - A valid HeartBeatNetworks.csv file must be present.
+    - The CSV file must contain a matching network entry for the DNS IP address.
+    - The function must be run with administrative privileges.
+    - Supports repeated execution and is suitable for automation through Ansible
+      playbooks and Windows Failover Cluster build processes.
+
+    #>
+
+    [CmdletBinding(SupportsShouldProcess)]
+    param()    
+
+    $FunctionName = $MyInvocation.MyCommand
+    Write-Log "Starting $FunctionName"
+
+    $NewNicName = "HeartBeat"
+    $CsvPath = "C:\Windows\Build\Config\WSFCHeartBeatCSV\HeartBeatNetworks.csv"
+
+    try {
+        $NetworkConfig = Import-Csv $CsvPath -ErrorAction Stop
+        }
+
+    catch {
+        Write-Log -Severity Error "Failed to load CSV file '$CsvPath'"
+        Write-Log "Finished $FunctionName"
+        return
+        }
+
+    #
+    # Heartbeat DNS record
+    #
+
+    $HBName = "$($env:COMPUTERNAME)-HB"
+
+    try {
+        $HBIP = (Resolve-DnsName $HBName -Type A -ErrorAction Stop).IPAddress
+       
+        }
+    catch {
+        Write-Log -Severity Error "Failed to resolve DNS name: $HBName"
+        Write-Log "Finished $FunctionName"
+        return
+    }       
+
+    Write-Log "Heartbeat DNS IP: $HBIP"
+
+    #
+    # Validate target adapter name is not already in use
+    #
+
+    $ExistingAdapter = Get-NetAdapter -Name $NewNicName -ErrorAction SilentlyContinue     
+
+    if ($ExistingAdapter) {
+
+        Write-Log "Existing HeartBeat adapter found"
+
+        try {
+            $CurrentHBIP = Get-NetIPAddress `
+                -InterfaceAlias $NewNicName `
+                -AddressFamily IPv4 `
+                -ErrorAction Stop |
+                Where-Object {
+                    $_.IPAddress -notmatch '^169\.254\.'
+                } |
+                Select-Object -ExpandProperty IPAddress -First 1
+        }
+        catch {
+            $CurrentHBIP = $null
+        }
+
+        Write-Log "Current HeartBeat IP: $CurrentHBIP"
+        Write-Log "Expected HeartBeat IP: $HBIP"
+
+        #
+        # Already correct
+        #
+        if ($CurrentHBIP -eq $HBIP) {
+
+            Write-Log "HeartBeat adapter already correctly configured"
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        Write-Log -Severity Warning "HeartBeat adapter IP mismatch. Current: $CurrentHBIP Expected: $HBIP"
+
+        if ($PSCmdlet.ShouldProcess($NewNicName, "Update HeartBeat NIC")) {
+
+        try{
+
+        $HBNetworkAddress = ($HBIP -split '\.')[0..2] -join '.'
+        $HBNetworkAddress += '.0'
+
+        $HBNetworkConfig = $NetworkConfig |
+            Where-Object Network -eq $HBNetworkAddress
+
+            if (-not $HBNetworkConfig) {
+            throw "No network configuration found in '$CsvPath' for network '$HBNetworkAddress'."
+            }
+        }
+        catch
+        {
+         Write-Log -Severity Error "No network configuration found in '$CsvPath' for network '$HBNetworkAddress'."
+        Write-Log "Finished $FunctionName"
+        return
+        }
+
+            try {
+
+                #
+                # Remove existing static IPv4 addresses
+                #
+                $StaticIPs = Get-NetIPAddress `
+                    -InterfaceAlias $NewNicName `
+                    -AddressFamily IPv4 `
+                    -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.PrefixOrigin -eq 'Manual'
+                    }
+
+                if ($StaticIPs) {
+                    $StaticIPs | Remove-NetIPAddress -Confirm:$false
+                }
+
+                #
+                # Apply IP using existing CSV configuration
+                #
+                New-NetIPAddress `
+                    -InterfaceAlias $NewNicName `
+                    -IPAddress $HBIP `
+                    -PrefixLength $HBNetworkConfig.PrefixLength `
+                    -ErrorAction Stop
+
+                Set-DnsClient `
+                    -InterfaceAlias $NewNicName `
+                    -RegisterThisConnectionsAddress $false `
+                    -ErrorAction Stop
+
+                Write-Log "HeartBeat adapter updated to $HBIP/$($HBNetworkConfig.PrefixLength)"
+            }
+            catch {
+                Write-Log -Severity Error $_.Exception.Message
+                Write-Log "Finished $FunctionName"
+                return
+            }
+        }
+
+        Write-Log "Finished $FunctionName"
+        return
+    }
+
+    
+
+    try{
+    
+        $HBNetworkAddress = ($HBIP -split '\.')[0..2] -join '.'
+        $HBNetworkAddress += '.0'
+
+        $HBNetworkConfig = $NetworkConfig |
+            Where-Object Network -eq $HBNetworkAddress
+
+            if (-not $HBNetworkConfig) {
+            throw "No network configuration found in '$CsvPath' for network '$HBNetworkAddress'."
+            }
+        }
+        catch
+        {
+         Write-Log -Severity Error "No network configuration found in '$CsvPath' for network '$HBNetworkAddress'."
+        Write-Log "Finished $FunctionName"
+        return
+        }
+    #
+    # Find candidate adapter
+    #
+    $Adapters = Get-NetAdapter |
+        Where-Object Status -eq Up |
+        Where-Object Name -notmatch 'Team|Prod|Management|Data|HeartBeat'
+
+    if (-not $Adapters) {
+        Write-Log -Severity Error "Additional Heartbeat adapter not found"
+        Write-Log "Finished $FunctionName"
+        return
+    }
+
+    if (($Adapters | Measure-Object).Count -gt 1) {
+
+        Write-Log -Severity Error "Multiple possible heartbeat adapters found. Aborting."
+
+        $Adapters |
+            Select-Object Name, InterfaceDescription |
+            Format-Table -AutoSize
+         Write-Log "Finished $FunctionName"
+        return
+    }
+
+    $Adapter = $Adapters[0]
+
+    Write-Log "Selected adapter: $($Adapter.Name)"
+
+    #
+    # Verify adapter does not already contain HB IP
+    #
+    $ExistingIP = Get-NetIPAddress `
+        -InterfaceIndex $Adapter.ifIndex `
+        -AddressFamily IPv4 `
+        -ErrorAction SilentlyContinue |
+        Where-Object IPAddress -eq $HBIP
+
+    if ($ExistingIP) {
+                        Write-Log "Found adapter '$($Adapter.Name)' already configured with heartbeat IP $HBIP"
+
+                        if ($Adapter.Name -ne $NewNicName) {
+
+                            Write-Log "Renaming adapter '$($Adapter.Name)' to '$NewNicName'"
+
+                            Rename-NetAdapter `
+                                -Name $Adapter.Name `
+                                -NewName $NewNicName `
+                                -ErrorAction Stop
+                        }
+
+                        Write-Log "HeartBeat adapter already configured"
+                        Write-Log "Finished $FunctionName"
+                        return
+                    }
+
+    if ($PSCmdlet.ShouldProcess($Adapter.Name, "Configure Heartbeat NIC")) {
+
+        try {
+
+            #
+            # Rename adapter
+            #
+            Rename-NetAdapter `
+                -Name $Adapter.Name `
+                -NewName $NewNicName `
+                -ErrorAction Stop
+
+            #
+            # Remove existing IPv4 addresses
+            #
+            try {
+                $StaticIPs = Get-NetIPAddress `
+                    -InterfaceAlias $NewNicName `
+                    -AddressFamily IPv4 `
+                    -ErrorAction Stop |
+                Where-Object {
+                    $_.PrefixOrigin -eq 'Manual'
+                }
+            }
+            catch {
+                Write-Verbose "No IPv4 addresses found on adapter '$NewNicName'"
+                $StaticIPs = @()
+            }
+
+            if ($StaticIPs.Count -gt 0) {
+                $StaticIPs | Remove-NetIPAddress -Confirm:$false
+            }
+
+            #
+            # Apply address
+            #
+            New-NetIPAddress `
+                -InterfaceAlias $NewNicName `
+                -IPAddress $HBIP `
+                -PrefixLength $HBNetworkConfig.PrefixLength
+
+            Set-DnsClient `
+                -InterfaceAlias $NewNicName `
+                -RegisterThisConnectionsAddress $false
+
+            Write-Log "Heartbeat configured as $HBIP"
+        }
+        catch {
+            Write-Log -Severity Error $_.Exception.Message
+            Write-Log -Severity Error  "Finished $FunctionName"
+            return
+        }
+    }
+
+    Write-Log "Finished $FunctionName"
+}
+
 function Add-HeartBeatRouteCSV {
 
     <#
@@ -2311,7 +2646,7 @@ function Invoke-HeartBeatDeployment {
 
     Set-XHeartBeatNICName
 
-    Set-HeartBeatNICCSV
+    Set-HeartBeatNICfromDNS
 
     Set-HeartbeatClusterNetworkCSV
 
