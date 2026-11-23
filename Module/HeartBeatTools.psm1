@@ -2682,7 +2682,10 @@ function Test-HeartBeatDNSAllNode {
         $CS = Get-CimInstance Win32_ComputerSystem
 
         $Domain = $CS.Domain
-        $DomainController = $env:LOGONSERVER.TrimStart('\')
+        $DomainController = (
+    	Resolve-DnsName -Type SRV "_ldap._tcp.dc._msdcs.$env:USERDNSDOMAIN" |
+	Select-Object -First 1 -ExpandProperty NameTarget
+	).TrimEnd('.')
 
         $Failures = 0
         $Records = @()
