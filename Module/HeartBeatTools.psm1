@@ -3189,7 +3189,7 @@ function Invoke-HeartBeatRollback {
 
     Enable-OldHeartBeatNIC
 
-    Remove-HeartBeatRoute
+    Remove-HeartBeatRouteCSV
 
     Restore-HeartBeatNIC
 
