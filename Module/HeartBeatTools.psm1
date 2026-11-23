@@ -710,7 +710,7 @@ function Add-HeartBeatRoute {
 
     $FunctionName = $MyInvocation.MyCommand
     Write-Log "Starting $FunctionName"
-
+    
     try {
 
         #
@@ -743,10 +743,35 @@ function Add-HeartBeatRoute {
         #
         # Determine local and remote nodes
         #
+        $SiteA = 'N01','N02'
+        $SiteB = 'N03','N04'
+
         $LocalNode = $env:COMPUTERNAME
 
-        $RemoteNode = (Get-ClusterNode |
-            Where-Object Name -ne $LocalNode).Name
+        $NodeSuffix = $LocalNode.Substring($LocalNode.Length - 3)
+
+            if ($NodeSuffix -in $SiteA)
+            {
+                $SameSiteNodes = (Get-ClusterNode).Name | Where-Object {
+                    $_ -match 'N01|N02' -and $_ -ne $LocalNode
+                }
+
+                $RemoteSiteNodes = (Get-ClusterNode).Name | Where-Object {
+                    $_ -match 'N03|N04'
+                }
+            }
+            else
+            {
+                $SameSiteNodes = (Get-ClusterNode).Name | Where-Object {
+                    $_ -match 'N03|N04' -and $_ -ne $LocalNode
+                }
+
+                $RemoteSiteNodes = (Get-ClusterNode).Name | Where-Object {
+                    $_ -match 'N01|N02'
+                }
+            }
+
+        $RemoteNode = $RemoteSiteNodes | Select-Object -First 1
 
         if (-not $RemoteNode) {
             Write-Log -Severity Error "Unable to identify remote cluster node."
