@@ -2640,6 +2640,152 @@ No changes made.
     Write-Log "Finished $FunctionName"
 }
 
+function Test-HeartBeatDNSAllNode {
+
+    <#
+    .SYNOPSIS
+    Validates HeartBeat DNS records and IP connectivity.
+
+    .DESCRIPTION
+    Resolves DNS records for all cluster nodes, including the
+    standard hostname, heartbeat (-HB), and heartbeat-x (-HBX)
+    records. Performs ICMP connectivity tests against each
+    resolved IP address.
+
+    .PARAMETER PingCount
+    Number of ICMP echo requests to send.
+
+    .EXAMPLE
+    Test-HeartBeatDNSAllNode
+
+    Performs DNS and ping validation for all cluster nodes
+    using two ping attempts.
+
+    .EXAMPLE
+    Test-HeartBeatDNSAllNode -PingCount 10
+
+    Performs DNS and ping validation for all cluster nodes
+    using ten ping attempts.
+    #>
+
+    [CmdletBinding()]
+    param(
+        [int]$PingCount = 2
+    )
+
+    $FunctionName = $MyInvocation.MyCommand.Name
+
+    Write-Log "Starting $FunctionName"
+
+    try {
+
+        $CS = Get-CimInstance Win32_ComputerSystem
+
+        $Domain = $CS.Domain
+        $DomainController = $env:LOGONSERVER.TrimStart('\')
+
+        $Failures = 0
+        $Records = @()
+
+        try {
+
+            $ClusterNodes = Get-ClusterNode -ErrorAction Stop
+
+            foreach ($Node in $ClusterNodes) {
+
+                $Records += @(
+                    $Node.Name
+                    "$($Node.Name)-HB"
+                    "$($Node.Name)-HBX"
+                )
+            }
+
+            Write-Log "Found $($ClusterNodes.Count) cluster node(s)."
+
+        }
+        catch {
+
+            Write-Log -Severity Error "Failed to enumerate cluster nodes."
+            Write-Log "Exception : $($_.Exception.Message)"
+            throw
+        }
+
+        $Records = $Records | Sort-Object -Unique
+
+        foreach ($Record in $Records) {
+
+            # Append domain unless already FQDN
+            $FQDN = if ($Record -match '\.') {
+                $Record
+            }
+            else {
+                "$Record.$Domain"
+            }
+
+            Write-Log "Testing $Record"
+
+            try {
+
+                $IP = Resolve-DnsName `
+                    -Name $FQDN `
+                    -Type A `
+                    -DnsOnly `
+                    -Server $DomainController `
+                    -ErrorAction Stop |
+                    Select-Object -First 1 -ExpandProperty IPAddress
+
+                if (-not $IP) {
+                    throw "No IPv4 A record returned for $FQDN"
+                }
+
+                Write-Log "Resolved to $IP"
+
+                if (Test-Connection `
+                        -ComputerName $IP `
+                        -Count $PingCount `
+                        -Quiet) {
+
+                    Write-Log "PASS - Ping successful for $IP"
+                }
+                else {
+
+                    Write-Log -Severity Error "FAIL - Ping failed for $IP"
+                    $Failures++
+                }
+            }
+            catch {
+
+                Write-Log -Severity Error "FAIL - DNS resolution failed for $FQDN"
+                Write-Log "Exception : $($_.Exception.Message)"
+
+                $Failures++
+            }
+        }
+
+        if ($Failures -eq 0) {
+
+            Write-Log "All DNS and ping tests passed."
+        }
+        else {
+
+            Write-Log -Severity Error "$Failures validation test(s) failed."
+        }
+
+        Write-Log "Finished $FunctionName"
+        return
+    }
+    catch {
+
+        Write-Log "Function failed"
+        Write-Log "Exception : $($_.Exception.Message)"
+        Write-Log "Line      : $($_.InvocationInfo.ScriptLineNumber)"
+        Write-Log "Statement : $($_.InvocationInfo.Line.Trim())"
+
+        Write-Log "Finished $FunctionName"
+        return
+    }
+}
+
 function Invoke-HeartBeatDeployment {
 
     Export-ClusterBaseline
