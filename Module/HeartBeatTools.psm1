@@ -1677,6 +1677,384 @@ function Remove-HiddenDevices {
 
 }
 
+function Remove-HeartBeatRoute {
+
+    <#
+    .SYNOPSIS
+    Removes the static route between cluster heartbeat networks.
+
+    .DESCRIPTION
+    Uses cluster node information and DNS records to
+    calculate the heartbeat route and removes the
+    corresponding route from the HeartBeat adapter.
+
+    .EXAMPLE
+    Remove-HeartBeatRoute
+
+    Removes the heartbeat route.
+    #>
+
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
+    $FunctionName = $MyInvocation.MyCommand
+    Write-Log "Starting $FunctionName"
+
+    try {
+
+        #
+        # Validate cluster membership
+        #
+        try {
+            $null = Get-Cluster -ErrorAction Stop
+        }
+        catch {
+            Write-Log -Severity Error "This server is not a cluster node."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Validate heartbeat adapter exists
+        #
+        $NewNicName = "HeartBeat"
+
+        $Adapter = Get-NetAdapter `
+            -Name $NewNicName `
+            -ErrorAction SilentlyContinue
+
+        if (-not $Adapter) {
+            Write-Log -Severity Error "Adapter '$NewNicName' not found."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Determine local and remote nodes
+        #
+        $LocalNode = $env:COMPUTERNAME
+
+        $RemoteNode = (Get-ClusterNode |
+            Where-Object Name -ne $LocalNode).Name
+
+        if (-not $RemoteNode) {
+            Write-Log -Severity Error "Unable to identify remote cluster node."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Resolve heartbeat DNS records
+        #
+        try {
+            $RemoteHBIP = (Resolve-DnsName "$RemoteNode-HB" -ErrorAction Stop).IPAddress
+            $LocalHBIP  = (Resolve-DnsName "$LocalNode-HB" -ErrorAction Stop).IPAddress
+        }
+        catch {
+            Write-Log -Severity Error "Failed to resolve heartbeat DNS records."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Build route information
+        #
+        $LocalGatewayIP = ($LocalHBIP -replace '\d+$','254')
+        $DestPrefix     = ($RemoteHBIP -replace '\d+$','0')
+
+        Write-Log "Destination Prefix : $DestPrefix/24"
+        Write-Log "Next Hop           : $LocalGatewayIP"
+
+        #
+        # Find route
+        #
+        $ExistingRoute = Get-NetRoute `
+            -DestinationPrefix "$DestPrefix/24" `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.NextHop -eq $LocalGatewayIP
+            }
+
+        if (-not $ExistingRoute) {
+            Write-Log -Severity Warning "Route not found."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Remove route
+        #
+        if ($PSCmdlet.ShouldProcess($DestPrefix, "Remove heartbeat route")) {
+
+            $ExistingRoute | Remove-NetRoute `
+                -Confirm:$false `
+                -ErrorAction Stop
+
+            Write-Log "Route removed successfully."
+        }
+
+        Write-Log "Finished $FunctionName"
+    }
+    catch {
+        Write-Log -Severity Error "Function failed"
+        Write-Log -Severity Error "Exception : $($_.Exception.Message)"
+        Write-Log -Severity Error "Line      : $($_.InvocationInfo.ScriptLineNumber)"
+        Write-Log -Severity Error "Statement : $($_.InvocationInfo.Line.Trim())"
+        Write-Log -Severity Error "Finished $FunctionName"
+        return
+    }
+
+    Write-Log "Finished $FunctionName"
+}
+
+function Remove-HeartBeatRouteCSV {
+
+    <#
+    .SYNOPSIS
+    Removes a static route between cluster heartbeat networks.
+
+    .DESCRIPTION
+    Uses cluster node information and DNS records to
+    calculate the required route from the CSV configuration
+    and removes the corresponding heartbeat route.
+
+    .EXAMPLE
+    Remove-HeartBeatRouteCSV
+
+    Removes the remote heartbeat route.
+    #>
+
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
+    $FunctionName = $MyInvocation.MyCommand
+    Write-Log "Starting $FunctionName"
+
+    try{
+
+        $CsvPath = "C:\WINDOWS\Build\Config\WSFCHeartBeatCSV\HeartBeatNetworks.csv"
+        $RouteNetworks = Import-Csv $CsvPath
+
+        if (-not $RouteNetworks) {
+                throw "No network configuration found in '$CsvPath' for network '$RouteNetworks'."
+                }
+            }
+            catch
+            {
+            Write-Log -Severity Error "No network configuration found in '$CsvPath' for network '$RouteNetworks'."
+            Write-Log "Finished $FunctionName"
+            return
+            }
+
+    try {
+
+        #
+        # Validate cluster membership
+        #
+        try {
+            $null = Get-Cluster -ErrorAction Stop
+        }
+        catch {
+            Write-Log -Severity Error "This server is not a cluster node."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Validate heartbeat adapter exists
+        #
+        $NewNicName = "HeartBeat"
+
+        $Adapter = Get-NetAdapter `
+            -Name $NewNicName `
+            -ErrorAction SilentlyContinue
+
+        if (-not $Adapter) {
+            Write-Log -Severity Error "Adapter '$NewNicName' not found."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Determine local and remote nodes
+        #
+        $SiteA = 'N01','N02'
+        $SiteB = 'N03','N04'
+
+        $LocalNode = $env:COMPUTERNAME
+
+        $NodeSuffix = $LocalNode.Substring($LocalNode.Length - 3)
+
+        if ($NodeSuffix -in $SiteA)
+        {
+            $SameSiteNodes = (Get-ClusterNode).Name | Where-Object {
+                $_ -match 'N01|N02' -and $_ -ne $LocalNode
+            }
+
+            $RemoteSiteNodes = (Get-ClusterNode).Name | Where-Object {
+                $_ -match 'N03|N04'
+            }
+        }
+        else
+        {
+            $SameSiteNodes = (Get-ClusterNode).Name | Where-Object {
+                $_ -match 'N03|N04' -and $_ -ne $LocalNode
+            }
+
+            $RemoteSiteNodes = (Get-ClusterNode).Name | Where-Object {
+                $_ -match 'N01|N02'
+            }
+        }
+
+        $RemoteNode = $RemoteSiteNodes | Select-Object -First 1
+
+        if (-not $RemoteNode) {
+            try {
+                $RemoteNode = (Get-ClusterNode |
+                    Where-Object Name -ne $LocalNode).Name
+            }
+            catch {
+                Write-Log -Severity Error "Unable to identify remote cluster node."
+                Write-Log "Finished $FunctionName"
+                return
+            }
+        }
+
+        #
+        # Resolve heartbeat DNS records
+        #
+        try {
+            $RemoteHBIP = (Resolve-DnsName "$RemoteNode-HB" -ErrorAction Stop).IPAddress
+            $LocalHBIP  = (Resolve-DnsName "$LocalNode-HB" -ErrorAction Stop).IPAddress
+        }
+        catch {
+            Write-Log -Severity Error "Failed to resolve heartbeat DNS records."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Match CSV networks
+        #
+        $RemoteRouteConfig = $null
+        $LocalRouteConfig  = $null
+
+        foreach ($Route in $RouteNetworks)
+        {
+            $MaskBytes = ([System.Net.IPAddress]::Parse($Route.SubnetMask)).GetAddressBytes()
+
+            #
+            # Remote heartbeat lookup
+            #
+            $RemoteIPBytes = ([System.Net.IPAddress]::Parse($RemoteHBIP)).GetAddressBytes()
+
+            $RemoteNetworkBytes = for ($i = 0; $i -lt 4; $i++)
+            {
+                $RemoteIPBytes[$i] -band $MaskBytes[$i]
+            }
+
+            $RemoteNetwork = ([System.Net.IPAddress]::new($RemoteNetworkBytes)).ToString()
+
+            if ($RemoteNetwork -eq $Route.Network)
+            {
+                $RemoteRouteConfig = $Route
+            }
+
+            #
+            # Local heartbeat lookup
+            #
+            $LocalIPBytes = ([System.Net.IPAddress]::Parse($LocalHBIP)).GetAddressBytes()
+
+            $LocalNetworkBytes = for ($i = 0; $i -lt 4; $i++)
+            {
+                $LocalIPBytes[$i] -band $MaskBytes[$i]
+            }
+
+            $LocalNetwork = ([System.Net.IPAddress]::new($LocalNetworkBytes)).ToString()
+
+            if ($LocalNetwork -eq $Route.Network)
+            {
+                $LocalRouteConfig = $Route
+            }
+        }
+
+        if (-not $RemoteRouteConfig)
+        {
+            Write-Log -Severity Error "No matching remote network found for $RemoteHBIP"
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        if (-not $LocalRouteConfig)
+        {
+            Write-Log -Severity Error "No matching local network found for $LocalHBIP"
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        $LocalGatewayIP = $LocalRouteConfig.Gateway
+
+        $PrefixLength = switch ($RemoteRouteConfig.SubnetMask)
+        {
+            '255.255.254.0'   { 23 }
+            '255.255.255.0'   { 24 }
+            '255.255.255.128' { 25 }
+            '255.255.255.192' { 26 }
+            '255.255.255.224' { 27 }
+            '255.255.255.240' { 28 }
+            '255.255.255.248' { 29 }
+            '255.255.255.252' { 30 }
+            default { throw "Unsupported subnet mask $($RemoteRouteConfig.SubnetMask)" }
+        }
+
+        $DestPrefix = "$($RemoteRouteConfig.Network)/$PrefixLength"
+
+        Write-Log "Destination Prefix : $DestPrefix"
+        Write-Log "Next Hop           : $LocalGatewayIP"
+
+        #
+        # Find route
+        #
+        $ExistingRoute = Get-NetRoute `
+            -DestinationPrefix $DestPrefix `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.NextHop -eq $LocalGatewayIP
+            }
+
+        if (-not $ExistingRoute)
+        {
+            Write-Log "Route not found."
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Remove route
+        #
+        if ($PSCmdlet.ShouldProcess($DestPrefix, "Remove heartbeat route"))
+        {
+            $ExistingRoute | Remove-NetRoute `
+                -Confirm:$false `
+                -ErrorAction Stop
+
+            Write-Log "Route removed successfully."
+        }
+
+        Write-Log "Finished $FunctionName"
+    }
+    catch {
+        Write-Log -Severity Error "Function failed"
+        Write-Log -Severity Error "Exception : $($_.Exception.Message)"
+        Write-Log -Severity Error "Line      : $($_.InvocationInfo.ScriptLineNumber)"
+        Write-Log -Severity Error "Statement : $($_.InvocationInfo.Line.Trim())"
+        Write-Log -Severity Error "Finished $FunctionName"
+        return
+    }
+
+    Write-Log "Finished $FunctionName"
+}
+
 function Set-HeartBeatNICCSV {
 
     <#
@@ -2810,6 +3188,8 @@ function Invoke-HeartBeatRollback {
     Export-ClusterBaseline
 
     Enable-OldHeartBeatNIC
+
+    Remove-HeartBeatRoute
 
     Restore-HeartBeatNIC
 
