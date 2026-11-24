@@ -222,6 +222,163 @@ function Export-ClusterBaseline {
     Write-Log "Output folder: $Folder"
 }
 
+function Set-DataNIC {
+
+    <#
+    .SYNOPSIS
+    Renames the production network adapter to Data.
+
+    .DESCRIPTION
+    Resolves the server's primary DNS A record and identifies
+    the network adapter configured with the matching IP
+    address. If required, renames the adapter to 'Data'.
+
+    If the adapter is already named 'Data', no changes are
+    made.
+
+    .EXAMPLE
+    Set-DataNIC
+
+    Resolves the server DNS record and ensures the adapter
+    configured with that IP address is named Data.
+
+    .NOTES
+    Requires DNS registration of the production network IP.
+    #>
+
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
+    $FunctionName = $MyInvocation.MyCommand.Name
+
+    Write-Log "Starting $FunctionName"
+
+    try {
+
+        $DataNicName = "Data"
+
+        #
+        # Find Domain Controller
+        #
+        $DomainController = (
+            Resolve-DnsName `
+                -Type SRV `
+                "_ldap._tcp.dc._msdcs.$env:USERDNSDOMAIN" |
+            Select-Object -First 1 -ExpandProperty NameTarget
+        ).TrimEnd('.')
+
+        Write-Log "Using domain controller $DomainController"
+
+        #
+        # Build Data DNS record
+        #
+        $CS = Get-CimInstance Win32_ComputerSystem
+
+        $DataDNS = "$($CS.DNSHostName).$($CS.Domain)"
+
+        Write-Log "Validating DNS record $DataDNS"
+
+        #
+        # Resolve Data DNS record
+        #
+        try {
+
+            $DataIP = Resolve-DnsName `
+                -Name $DataDNS `
+                -Type A `
+                -DnsOnly `
+                -Server $DomainController `
+                -ErrorAction Stop |
+                Select-Object -First 1 -ExpandProperty IPAddress
+
+            if (-not $DataIP) {
+                throw "No IPv4 A record returned for $DataDNS"
+            }
+
+            Write-Log "Resolved $DataDNS to $DataIP"
+        }
+        catch {
+
+            Write-Log -Severity Error "DNS resolution failed for $DataDNS"
+            Write-Log "Exception : $($_.Exception.Message)"
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Locate adapter using resolved IP
+        #
+        $IPAddressConfig = Get-NetIPAddress `
+            -AddressFamily IPv4 `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.IPAddress -eq $DataIP
+            }
+
+        if (-not $IPAddressConfig) {
+
+            Write-Log -Severity Error "No adapter found using IP address $DataIP"
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        if ($IPAddressConfig.Count -gt 1) {
+
+            Write-Log -Severity Error "Multiple adapters found using IP address $DataIP"
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        $Adapter = Get-NetAdapter `
+            -InterfaceIndex $IPAddressConfig.InterfaceIndex `
+            -ErrorAction SilentlyContinue
+
+        if (-not $Adapter) {
+
+            Write-Log -Severity Error "Failed to identify adapter using IP $DataIP"
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        Write-Log "Adapter identified as '$($Adapter.Name)'"
+
+        #
+        # Adapter already correct
+        #
+        if ($Adapter.Name -eq $DataNicName) {
+
+            Write-Log "Adapter already named '$DataNicName'"
+            Write-Log "Finished $FunctionName"
+            return
+        }
+
+        #
+        # Rename adapter
+        #
+        if ($PSCmdlet.ShouldProcess($Adapter.Name, "Rename adapter to $DataNicName")) {
+
+            Rename-NetAdapter `
+                -Name $Adapter.Name `
+                -NewName $DataNicName `
+                -ErrorAction Stop
+
+            Write-Log "Renamed adapter '$($Adapter.Name)' to '$DataNicName'"
+        }
+
+        Write-Log "Finished $FunctionName"
+    }
+    catch {
+
+        Write-Log -Severity Error "Function failed"
+        Write-Log -Severity Error "Exception : $($_.Exception.Message)"
+        Write-Log -Severity Error "Line      : $($_.InvocationInfo.ScriptLineNumber)"
+        Write-Log -Severity Error "Statement : $($_.InvocationInfo.Line.Trim())"
+        Write-Log -Severity Error "Finished $FunctionName"
+
+        return
+    }
+}
+
 function Set-XHeartBeatNICName {
 
     <#
@@ -3195,6 +3352,8 @@ function Test-HeartBeatDNSAllNode {
 function Invoke-HeartBeatDeployment {
 
     Export-ClusterBaseline
+
+    Set-DataNIC
 
     Set-XHeartBeatNICName
 
